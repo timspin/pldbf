@@ -1,0 +1,309 @@
+CREATE OR REPLACE PACKAGE BODY pldbf AS
+    
+    TYPE tp_r_column_type IS RECORD (
+        name VARCHAR2(11),
+        type VARCHAR2(30),
+        length PLS_INTEGER,
+        precision PLS_INTEGER
+    );
+    
+    TYPE tp_t_r_column_types IS TABLE OF tp_r_column_type INDEX BY PLS_INTEGER;
+    
+    b_body BLOB;
+    b_header_before_rowcount BLOB;
+    b_header_after_rowcount BLOB;
+    raw_buf RAW(32767);
+    s_codepage VARCHAR2(2) := '65'; -- 65 (Dos) C9/57 (Win)
+    s_nill VARCHAR2(1) := CHR(0); 
+    n_curr_cell PLS_INTEGER := 1;
+    t_columns tp_t_r_column_types;
+    n_rowcount PLS_INTEGER := 0;
+
+    PROCEDURE unset_columns
+    IS
+    BEGIN
+        t_columns.DELETE;
+    END unset_columns;
+    
+    PROCEDURE add_column(
+        s_name VARCHAR2,
+        s_type VARCHAR2,
+        n_length PLS_INTEGER DEFAULT NULL,
+        n_precision PLS_INTEGER DEFAULT NULL)
+    IS
+        n_count PLS_INTEGER := t_columns.COUNT;
+    BEGIN
+        FOR i IN 1 .. n_count
+        LOOP
+            IF t_columns(i).name = s_name
+            THEN
+                raise_application_error(-20001, 'COLUMN_ALREADY_DEFINED');            
+            END IF;
+        END LOOP;
+        
+        n_count := n_count + 1; 
+        t_columns(n_count).name := s_name;
+        t_columns(n_count).type := s_type;
+        IF UPPER(s_type) = 'DATE'
+        THEN
+            t_columns(n_count).length := 8;
+        ELSE
+            t_columns(n_count).length := n_length;
+        END IF;
+        t_columns(n_count).precision := n_precision;
+    END add_column;        
+    
+    -- принимает на вход строку вида '0D 0A 19'
+    FUNCTION getraw(s VARCHAR2) RETURN RAW
+    IS
+    BEGIN
+        RETURN HEXTORAW(REPLACE(s, ' '));
+    END getraw;
+    
+    -- конвертирует varchar2 в raw
+    FUNCTION prepraw(s VARCHAR2) RETURN RAW
+    IS
+    BEGIN
+        RETURN utl_raw.cast_to_raw(s);
+    END prepraw;
+    
+    FUNCTION nillbyte RETURN RAW
+    IS
+    BEGIN
+        RETURN prepraw(s_nill);
+    END;
+    
+    FUNCTION nillbyte(n PLS_INTEGER) RETURN RAW
+    IS
+        raw_result RAW(32767);
+    BEGIN
+        FOR i IN 1 .. n
+        LOOP
+            raw_result := utl_raw.concat(raw_result, nillbyte());
+        END LOOP;
+        RETURN raw_result;
+    END nillbyte;
+    
+    -- конвертирует varchar2 в raw
+    FUNCTION putbyte(
+        value PLS_INTEGER DEFAULT 0,
+        n_length PLS_INTEGER DEFAULT 1) RETURN RAW
+    IS
+        raw_result RAW(32767);
+    BEGIN
+        IF NVL(value, 0) <= 255 
+        THEN
+            RETURN utl_raw.concat(prepraw(CHR(NVL(value, 0))), nillbyte(n_length-1));
+        ELSE
+            RETURN utl_raw.substr(utl_raw.cast_from_binary_integer(value, 2), 1, n_length);
+        END IF;   
+    END putbyte;
+    
+    FUNCTION putbyte(
+        value NUMBER DEFAULT 0,
+        n_length PLS_INTEGER DEFAULT 1) RETURN RAW
+    IS
+        raw_result RAW(32767);
+    BEGIN
+        IF NVL(value, 0) <= 255 
+        THEN
+            RETURN utl_raw.concat(prepraw(CHR(NVL(value, 0))), nillbyte(n_length-1));
+        ELSE
+            RETURN utl_raw.substr(utl_raw.cast_from_binary_integer(value, 2), 1, n_length);
+        END IF;   
+    END putbyte;
+    
+    PROCEDURE writeblob(s_blob VARCHAR2 DEFAULT 'body')
+    IS
+    BEGIN
+        IF s_blob = 'body'
+        THEN
+            dbms_lob.writeappend(b_body, utl_raw.length(raw_buf), raw_buf);
+        ELSIF s_blob = 'before_rowcount'
+        THEN
+            dbms_lob.writeappend(b_header_before_rowcount, utl_raw.length(raw_buf), raw_buf);
+        ELSE
+            dbms_lob.writeappend(b_header_after_rowcount, utl_raw.length(raw_buf), raw_buf);
+        END IF;
+    END writeblob;
+    
+    PROCEDURE init(s_encoding VARCHAR2)
+    IS
+        n_record_size PLS_INTEGER := 0;
+    BEGIN
+        IF s_encoding NOT IN ('DOS', 'WIN')
+        THEN
+            raise_application_error(-20001, 'INCORRECT_ENCODING');
+        ELSE
+            CASE s_encoding
+                WHEN 'DOS' THEN
+                    s_codepage := '65';
+                WHEN 'WIN' THEN 
+                    s_codepage := 'C9';
+            END CASE;
+        END IF;
+        IF t_columns.COUNT = 0
+        THEN
+            raise_application_error(-20001, 'COLUMNS_NOT_DEFINED');
+        END IF;
+        -- count record size
+        FOR i IN 1 .. t_columns.COUNT
+        LOOP
+            n_record_size := n_record_size + t_columns(i).length;
+        END LOOP;
+        n_record_size := n_record_size + 1;
+        dbms_lob.createtemporary(b_header_before_rowcount, true);
+        dbms_lob.createtemporary(b_header_after_rowcount, true);
+        dbms_lob.createtemporary(b_body, true);
+        n_curr_cell := 1;
+        n_rowcount := 0;
+        -- DBF header
+        raw_buf := utl_raw.concat(
+            -- 00 Simple table code
+            getraw('03'), 
+            -- Creation date 
+            utl_raw.concat(
+                -- 01
+                prepraw(CHR(TO_NUMBER(TO_CHAR(SYSDATE, 'YY'))+100)),
+                -- 02
+                prepraw(CHR(TO_NUMBER(TO_CHAR(SYSDATE, 'MM')))),
+                -- 03
+                prepraw(CHR(TO_NUMBER(TO_CHAR(SYSDATE, 'DD'))))
+            )
+        );
+        writeblob('before_rowcount');
+        
+        raw_buf := utl_raw.concat(
+            -- 08 HeaderSize
+            putbyte(32*(t_columns.COUNT+1)+1, 2),
+            -- 10 RecordSize 
+            putbyte(n_record_size, 2),
+            -- 12 Reserved 
+            nillbyte(2), 
+            -- 14 Ignored
+            nillbyte(),
+            -- 15 Normal visibility
+            nillbyte(),
+            -- 16 Multiuser mode off
+            nillbyte(12),
+            -- 28 Index not used
+            nillbyte(),
+            -- 29 Codepage
+            getraw(s_codepage),
+            -- 30 Reserved
+            nillbyte(2)
+        );
+        writeblob('after_rowcount');
+        
+        -- заголок полей
+        FOR i IN 1 .. t_columns.COUNT
+        LOOP
+            raw_buf := utl_raw.concat(
+                -- Name
+                prepraw(RPAD(t_columns(i).name, 11, s_nill)),
+                -- Type
+                prepraw(UPPER(SUBSTR(t_columns(i).type, 1, 1))),
+                -- Ignored
+                nillbyte(4),
+                -- Field size
+                putbyte(NVL(t_columns(i).length, 0)),
+                -- Precision size
+                putbyte(NVL(t_columns(i).precision, 0)),
+                -- Reserved
+                nillbyte(2),
+                -- Ignored
+                nillbyte(),
+                -- Ignored
+                nillbyte(2),
+                -- Ignored
+                nillbyte(),
+                -- Reserved
+                nillbyte(7),
+                -- Ignored
+                nillbyte()
+            );
+            writeblob;
+        END LOOP;
+        raw_buf := getraw('0D');
+        writeblob;
+    END init;
+    
+    PROCEDURE write_cell_(
+        value RAW,
+        s_type VARCHAR2)
+    IS
+    BEGIN
+        IF n_curr_cell = 1
+        THEN
+            raw_buf := prepraw(' ');
+            writeblob;
+        END IF;
+--        dbms_output.put_line('n_curr_cell='||n_curr_cell);
+--        dbms_output.put_line('t_columns(n_curr_cell).type='||t_columns(n_curr_cell).type||';');
+--        dbms_output.put_line('s_type='||s_type||';');
+        IF UPPER(t_columns(n_curr_cell).type) <> UPPER(s_type)
+        THEN
+            raise_application_error(-20001, 'COLUMN_TYPE_MISMATCH');
+        END IF;
+        --dbms_output.put_line('utl_raw.length(value)='||utl_raw.length(value)||';');
+        dbms_output.put_line('length='||(t_columns(n_curr_cell).length - utl_raw.length(value))||';');
+        dbms_output.put_line('е='||utl_raw.length(prepraw(RPAD(' ', t_columns(n_curr_cell).length - utl_raw.length(value)))));
+        raw_buf := utl_raw.concat(
+            value,
+            prepraw(RPAD(' ', t_columns(n_curr_cell).length - utl_raw.length(value)))
+        );
+        writeblob;
+        IF n_curr_cell = t_columns.COUNT
+        THEN
+            n_curr_cell := 1;
+            n_rowcount := n_rowcount + 1;
+        ELSE
+            n_curr_cell := n_curr_cell + 1;
+        END IF; 
+    END write_cell_;
+    
+    PROCEDURE write_cell(value DATE)
+    IS
+    BEGIN
+        write_cell_(
+            prepraw(TO_CHAR(value, 'YYYYMMDD')),
+            'date'
+        );
+    END write_cell;
+    
+    PROCEDURE write_cell(value VARCHAR2)
+    IS
+    BEGIN
+        write_cell_(
+            prepraw(value),
+            'char'
+        );
+    END write_cell;
+    
+    PROCEDURE write_cell(value NUMBER)
+    IS
+    BEGIN
+        write_cell_(
+            prepraw(LPAD(REPLACE(TO_CHAR(value), ',', '.'), t_columns(n_curr_cell).length)),
+            'number'
+        );
+    END write_cell;
+    
+    PROCEDURE get_file(b_blob OUT BLOB)
+    IS
+    BEGIN
+        -- write row count info
+        b_blob := b_header_before_rowcount;
+        dbms_lob.writeappend(b_blob, 4, putbyte(n_rowcount, 4));
+        -- close dbf format
+        raw_buf := getraw('1A');
+        writeblob;
+        -- stick together
+        dbms_lob.append(b_blob, b_header_after_rowcount);
+        dbms_lob.append(b_blob, b_body);
+        dbms_lob.freetemporary(b_header_before_rowcount);
+        dbms_lob.freetemporary(b_header_after_rowcount);
+        dbms_lob.freetemporary(b_body);
+    END get_file;
+    
+END pldbf;

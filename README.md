@@ -1,4 +1,4 @@
 pldbf
 =====
 
-PL/SQL package for creating DBF files
+PL/SQL package for creating DBF (dBase III) files
