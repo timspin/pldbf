@@ -238,16 +238,10 @@ CREATE OR REPLACE PACKAGE BODY pldbf AS
             raw_buf := prepraw(' ');
             writeblob;
         END IF;
---        dbms_output.put_line('n_curr_cell='||n_curr_cell);
---        dbms_output.put_line('t_columns(n_curr_cell).type='||t_columns(n_curr_cell).type||';');
---        dbms_output.put_line('s_type='||s_type||';');
         IF UPPER(t_columns(n_curr_cell).type) <> UPPER(s_type)
         THEN
-            raise_application_error(-20001, 'COLUMN_TYPE_MISMATCH');
+            raise_application_error(-20001, 'COLUMN_TYPE_MISMATCH: "' || UPPER(t_columns(n_curr_cell).type) || '" AND "' || UPPER(s_type) || '"');
         END IF;
-        --dbms_output.put_line('utl_raw.length(value)='||utl_raw.length(value)||';');
-        dbms_output.put_line('length='||(t_columns(n_curr_cell).length - utl_raw.length(value))||';');
-        dbms_output.put_line('å='||utl_raw.length(prepraw(RPAD(' ', t_columns(n_curr_cell).length - utl_raw.length(value)))));
         raw_buf := utl_raw.concat(
             value,
             prepraw(RPAD(' ', t_columns(n_curr_cell).length - utl_raw.length(value)))
@@ -262,29 +256,38 @@ CREATE OR REPLACE PACKAGE BODY pldbf AS
         END IF; 
     END write_cell_;
     
-    PROCEDURE write_cell(value DATE)
+    PROCEDURE write_cell(d_date DATE)
     IS
     BEGIN
         write_cell_(
-            prepraw(TO_CHAR(value, 'YYYYMMDD')),
+            prepraw(TO_CHAR(d_date, 'YYYYMMDD')),
             'date'
         );
     END write_cell;
     
-    PROCEDURE write_cell(value VARCHAR2)
+    PROCEDURE write_cell(s_string VARCHAR2)
     IS
     BEGIN
         write_cell_(
-            prepraw(value),
+            prepraw(NVL(SUBSTR(s_string, 1, t_columns(n_curr_cell).length), ' ')),
             'char'
         );
     END write_cell;
     
-    PROCEDURE write_cell(value NUMBER)
+    PROCEDURE write_cell(n_number NUMBER)
     IS
+        n_length PLS_INTEGER;
+        s_mask VARCHAR2(60);
     BEGIN
+        n_length := t_columns(n_curr_cell).length - t_columns(n_curr_cell).precision;
+        s_mask := LPAD('9', n_length, '9');
+        IF NVL(t_columns(n_curr_cell).precision, 0) > 0
+        THEN
+            s_mask := s_mask || '.';
+            s_mask := s_mask || LPAD('9', t_columns(n_curr_cell).precision, '9');
+        END IF;
         write_cell_(
-            prepraw(LPAD(REPLACE(TO_CHAR(value), ',', '.'), t_columns(n_curr_cell).length)),
+            prepraw(LPAD(NVL(TRIM(TO_CHAR(n_number, s_mask)), ' '), t_columns(n_curr_cell).length)),
             'number'
         );
     END write_cell;
@@ -307,3 +310,4 @@ CREATE OR REPLACE PACKAGE BODY pldbf AS
     END get_file;
     
 END pldbf;
+/

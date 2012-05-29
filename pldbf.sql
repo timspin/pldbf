@@ -10,12 +10,13 @@ CREATE OR REPLACE PACKAGE pldbf AS
     
     PROCEDURE init(s_encoding VARCHAR2);
     
-    PROCEDURE write_cell(value DATE);
+    PROCEDURE write_cell(d_date DATE);
     
-    PROCEDURE write_cell(value VARCHAR2);
+    PROCEDURE write_cell(s_string VARCHAR2);
     
-    PROCEDURE write_cell(value NUMBER);
+    PROCEDURE write_cell(n_number NUMBER);
     
     PROCEDURE get_file(b_blob OUT BLOB);
     
 END pldbf;
+/
